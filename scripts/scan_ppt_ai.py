@@ -45,10 +45,11 @@ EMPTY_WORDS = [
 ]
 # A3 开篇套话（正则）："随着……的不断发展"式长状语
 CLICHE_OPEN = re.compile(r"随着[^，。；！？]{2,15}(发展|推进|深入|普及|应用|出台|落地|演进)")
-# A4 AI 高频连接词
+# A4 AI 高频连接词与关联词
 CONNECTIVES = [
     "此外", "与此同时", "综上所述", "由此可见", "值得一提的是", "不难发现",
     "换言之", "一方面", "另一方面", "总而言之",
+    "不仅", "更是", "与其", "不如", "说到底", "本质上", "关键在于",
 ]
 
 # A2 拆字排版：单独成段的单位后缀
@@ -66,7 +67,7 @@ NUM_FRAME = re.compile(
     r"|\d+\s*(个|大|步|层|问|件事|条|类|Rules|RULES)"
     r"|第一|第二|第三"
 )
-# B2 对仗翻转（正文可用「不是A而是B」，标题套路要删——脚本全量标记，人工分场景）
+# B2 对仗翻转与骈偶（「不是A而是B」是限制项，全稿 ≤2 处——句法规则二）
 NOT_BUT = re.compile(r"不是[^，。；]{1,30}[，,]\s*(而)?是")
 FIRST_THEN = re.compile(r"先[^，。；]{1,20}[，,]\s*再")
 COMPARE = re.compile(r"[^，。；]{1,12}比[^，。；]{1,12}更")
@@ -85,6 +86,12 @@ MANIFESTO_TAIL = re.compile(r"TAKEAWAYS|RULES|END OF|→\s*完|Manifesto|MANIFES
 # B7 逗号链长句：两个句号之间的逗号 ≥3 即命中（句法规则四）
 SENT_SPLIT = re.compile(r"[。！？!?…]+")
 COMMA_CHAIN_MIN = 3
+
+# B8 感叹号 / B9 设问句：标题与正文分别判定（句法规则五）
+TITLE_MAX_LEN = 16     # 与 B3 一致：短段视为标题
+EXCLAMATION = re.compile(r"[！!]")
+QUESTION_END = re.compile(r"[？?]\s*$")
+QUESTION_MARK = re.compile(r"[？?]")
 
 # B5 自我重复
 MIN_DUP_LEN = 8        # 跨页重复片段最小长度（含中文）
@@ -209,11 +216,11 @@ def scan(pages):
             if m:
                 add(3, "B1", pno, s, f"数字框架：{m.group(0)}")
 
-    # ---- B2 对仗翻转 ----
+    # ---- B2 对仗翻转与骈偶 ----
     for pno, segs in pages:
         for s in segs:
             for m in NOT_BUT.finditer(s):
-                add(3, "B2", pno, s, "「不是A（而）是B」句式（正文可用，标题套路要删）")
+                add(3, "B2", pno, s, "「不是A（而）是B」句式（限制项，全稿合计 ≤2 处）")
             for m in FIRST_THEN.finditer(s):
                 add(3, "B2", pno, s, "「先X再Y」对仗句")
             for m in COMPARE.finditer(s):
@@ -275,9 +282,28 @@ def scan(pages):
             if hit:
                 add(10, "B6", pno, hit, "Manifesto 结尾模板（总结陈词/结束标记）")
 
+    # ---- B8 感叹号 / B9 设问句 ----
+    for pno, segs in pages:
+        for s in segs:
+            is_title = len(s) <= TITLE_MAX_LEN
+            # B8 感叹号：标题本该零感叹号
+            n_excl = len(EXCLAMATION.findall(s))
+            if n_excl:
+                if is_title:
+                    add(4, "B8", pno, s, f"标题含感叹号 ×{n_excl}——标题零感叹号，删掉改陈述")
+                else:
+                    add(2, "B8", pno, s, f"感叹号 ×{n_excl}——删感叹号，句子改陈述")
+            # B9 设问句：标题问号结尾，或正文问号（自问自答每个问号计一次）
+            if is_title and QUESTION_END.search(s):
+                add(3, "B9", pno, s, "设问句标题——判断直接给，改成陈述")
+            else:
+                n_q = len(QUESTION_MARK.findall(s))
+                if n_q:
+                    add(2, "B9", pno, s, f"设问句 ×{n_q}——有观点就直接说")
+
     # ---- 封顶 ----
     cap = {"A1": 12, "A2": 6, "A3": 12, "A4": 8, "B1": 15, "B2": 12,
-           "B3": 12, "B4": 9, "B5": 20, "B6": 10, "B7": 10}
+           "B3": 12, "B4": 9, "B5": 20, "B6": 10, "B7": 10, "B8": 8, "B9": 6}
     by_code = defaultdict(int)
     for h in hits:
         by_code[h["code"].rstrip("*")] += h["deduction"]
@@ -307,8 +333,9 @@ def grade(score):
 
 CODE_NAMES = {
     "A1": "英文装饰标签", "A2": "拆字排版", "A3": "空词/套话", "A4": "AI 连接词",
-    "B1": "数字框架", "B2": "对仗翻转句", "B3": "祈使句标题", "B4": "无灵主语",
+    "B1": "数字框架", "B2": "对仗翻转与骈偶", "B3": "祈使句标题", "B4": "无灵主语",
     "B5": "自我重复", "B6": "Manifesto 结尾", "B7": "逗号链长句",
+    "B8": "感叹号滥用", "B9": "设问句滥用",
 }
 
 
@@ -339,9 +366,10 @@ def report_md(path, score, hits, page_flags):
               "3. B3 祈使句标题 → 全稿留 ≤1 处给结尾；",
               "4. B4 无灵主语 → 换成「谁 + 做了什么」；",
               "5. B7 逗号链 → 一句 ≥3 个逗号就拆成短句，句号果断；",
-              "6. B1/B2 数字框架与对仗 → 拆，关键处点「不是 A，而是 B」（每页 ≤1）；",
-              "7. A 类词面 → 英文标签留 1–2 个，空词连接词清零。", "",
-              "> 本报告为启发式扫描，结构模式需人工确认；另请过一遍 `references/ppt-ai-patterns.md` 的 D 类结构信号检查单。改写方法见 `references/syntax-four-rules.md` 与 `references/page-type-playbook.md`。"]
+              "6. B8/B9 感叹号与设问 → 标题零感叹号，设问改直陈；",
+              "7. B1/B2 数字框架、对仗骈偶、「不是A而是B」→ 拆，关联词全稿 ≤2 处；",
+              "8. A 类词面 → 英文标签留 1–2 个，空词连接词清零。", "",
+              "> 本报告为启发式扫描，结构模式需人工确认；另请过一遍 `references/ppt-ai-patterns.md` 的 D 类结构信号检查单。改写方法见 `references/syntax-five-rules.md` 与 `references/page-type-playbook.md`。"]
     return "\n".join(lines)
 
 
