@@ -8,6 +8,10 @@
 
 也接受纯文本（无 P 行首），此时按整篇一页处理（P0）。
 
+--strict：严格模式。在标准 A/B 检查之上追加 C1–C5 实战配额检查（比喻词 /
+功能词 / 指示与时空指示词 / 作者话否定词 / 双行标题配平），规则见
+references/strict-mode-rules.md（多轮实战沉淀，规则六至十一）。
+
 输出：Markdown 报告（stdout）或 --json。模式编号见 references/ppt-ai-patterns.md。
 """
 import json
@@ -101,6 +105,23 @@ STOP_SUBSTR = (        # 公共长词，跨页出现属正常，不计
 )
 CJK = re.compile(r"[\u4e00-\u9fff]")
 
+# ---------- C 类：严格模式追加检查（--strict 启用 · 多轮实战配额） ----------
+
+# C1 物理比喻词（规则六：严格模式全稿清零；「压缩」「打磨」等技术搭配需人工确认）
+METAPHOR_WORDS = [
+    "柱子", "支柱", "四梁八柱", "梁柱", "秤", "垫脚石", "压舱石", "定海神针",
+    "托举", "撬动", "撑起", "下沉", "押注", "押", "磨", "垫", "压",
+]
+# C2 功能词（规则八：只/就/才/也极简；"是"仅计数不扣分，人工核对强调框配额）
+FUNCTION_WORDS = ["只", "就", "才", "也"]
+# 常见非功能词搭配：命中这些词时该字不算功能词（降低误报，如「天才」的才）
+FUNCTION_SKIP = ["天才", "才能", "才智", "才气", "船只", "一只", "两只",
+                 "就业", "就职", "就绪", "就餐", "就寝", "造就"]
+# C3 指示词与时空指示词（规则九：严格模式清零）
+DEICTIC_WORDS = ["这", "那", "各有各的", "今天", "从此"]
+# C4 作者话否定词（规则十：没/不是清零；古籍引文与字源字义豁免，需人工确认）
+NEGATION_WORDS = ["没", "不是"]
+
 
 def parse_pages(text):
     pages = []
@@ -164,7 +185,74 @@ def find_duplicates(pages):
     return [(f, sorted(found[f]), example[f]) for f in merged]
 
 
-def scan(pages):
+def strict_checks(pages):
+    """严格模式追加检查（C1–C5）。返回 (hits, page_flags)。
+
+    C1 比喻词 -2/个（封顶 -8）｜C2 功能词 -1/个（-6）｜C3 指示词 -1/个（-6）
+    C4 否定词 -1/个（-4）｜C5 双行标题失衡 -1/个（-4）。均需人工确认。
+    """
+    hits = []
+    flags = defaultdict(list)
+
+    def add(ded, code, page, snippet, note):
+        hits.append({"deduction": ded, "code": code, "page": page,
+                     "snippet": snippet[:60], "note": note})
+        flags[page].append(code)
+
+    # C1 比喻词
+    for pno, segs in pages:
+        for s in segs:
+            for w in METAPHOR_WORDS:
+                if w in s:
+                    add(2, "C1", pno, s,
+                        f"比喻词：{w}（严格模式清零；「压缩」「打磨」等技术搭配可留，需人工确认）")
+
+    # C2 功能词
+    for pno, segs in pages:
+        for s in segs:
+            s_clean = s
+            for sw in FUNCTION_SKIP:
+                s_clean = s_clean.replace(sw, "")
+            for w in FUNCTION_WORDS:
+                if w in s_clean:
+                    add(1, "C2", pno, s,
+                        f"功能词：{w}（删掉不伤句子就删；「就是」等固定搭配可留）")
+
+    # C3 指示词与时空指示词
+    for pno, segs in pages:
+        for s in segs:
+            for w in DEICTIC_WORDS:
+                if w in s:
+                    add(1, "C3", pno, s,
+                        f"指示/时空指示词：{w}（严格模式清零，改具体名词或删）")
+
+    # C4 作者话否定词
+    for pno, segs in pages:
+        for s in segs:
+            for w in NEGATION_WORDS:
+                if w in s:
+                    add(1, "C4", pno, s,
+                        f"作者话否定词：{w}（古籍引文/字源字义豁免，需人工确认）")
+
+    # C5 双行标题配平（规则十一：两侧汉字数差 ≤2；先过模式关再配平）
+    for pno, segs in pages:
+        for s in segs:
+            if " / " not in s:
+                continue
+            parts = [p.strip() for p in s.split(" / ") if p.strip()]
+            if len(parts) < 2:
+                continue
+            counts = [len(CJK.findall(p)) for p in parts]
+            diff = max(counts) - min(counts)
+            if diff > 2:
+                add(1, "C5", pno, s,
+                    f"双行标题两侧字数差 {diff}（{'/'.join(str(c) for c in counts)}），"
+                    "规则十一：配平，只挪字不加字，先过模式关再配平")
+
+    return hits, dict(flags)
+
+
+def scan(pages, strict=False):
     hits = []
     page_flags = defaultdict(list)
 
@@ -301,9 +389,17 @@ def scan(pages):
                 if n_q:
                     add(2, "B9", pno, s, f"设问句 ×{n_q}——有观点就直接说")
 
+    # ---- 严格模式追加检查（C 类）----
+    if strict:
+        shits, sflags = strict_checks(pages)
+        hits.extend(shits)
+        for p, codes in sflags.items():
+            page_flags[p].extend(codes)
+
     # ---- 封顶 ----
     cap = {"A1": 12, "A2": 6, "A3": 12, "A4": 8, "B1": 15, "B2": 12,
-           "B3": 12, "B4": 9, "B5": 20, "B6": 10, "B7": 10, "B8": 8, "B9": 6}
+           "B3": 12, "B4": 9, "B5": 20, "B6": 10, "B7": 10, "B8": 8, "B9": 6,
+           "C1": 8, "C2": 6, "C3": 6, "C4": 4, "C5": 4}
     by_code = defaultdict(int)
     for h in hits:
         by_code[h["code"].rstrip("*")] += h["deduction"]
@@ -336,20 +432,25 @@ CODE_NAMES = {
     "B1": "数字框架", "B2": "对仗翻转与骈偶", "B3": "祈使句标题", "B4": "无灵主语",
     "B5": "自我重复", "B6": "Manifesto 结尾", "B7": "逗号链长句",
     "B8": "感叹号滥用", "B9": "设问句滥用",
+    "C1": "比喻词", "C2": "功能词(只就才也)", "C3": "指示/时空指示词",
+    "C4": "作者话否定词(没/不是)", "C5": "双行标题字数失衡",
 }
 
 
-def report_md(path, score, hits, page_flags):
+def report_md(path, score, hits, page_flags, strict=False, shi_count=0):
     by_code = defaultdict(float)
     for h in hits:
         by_code[h["code"].rstrip("*")] += h["deduction"]
     lines = ["# PPT AI 味扫描报告", "",
              f"**文件：** {path}",
-             f"**总分：** {score} / 100　{grade(score)}（100 = 完全人话）", "",
-             "## 模式命中总览", "",
-             "| 模式 | 名称 | 扣分 |", "|---|---|---|"]
+             f"**总分：** {score} / 100　{grade(score)}（100 = 完全人话）", ""]
+    if strict:
+        lines += ["**模式：** 严格模式（标准 A/B 检查 + C1–C5 实战配额，规则见 references/strict-mode-rules.md）", "",
+                  f"**「是」计数：** {shi_count} 次——严格目标 ≤3 处「是……的」强调框，人工核对", ""]
+    lines += ["## 模式命中总览", "",
+              "| 模式 | 名称 | 扣分 |", "|---|---|---|"]
     for code in sorted(by_code):
-        lines.append(f"| {code} | {CODE_NAMES.get(code, code)} | -{by_code[code]} |")
+        lines.append(f"| {code} | {CODE_NAMES.get(code, code)} | -{round(by_code[code], 1)} |")
     lines += ["", "## Top 问题（按扣分排序）", "",
               "| # | 扣分 | 模式 | 页 | 命中 | 说明 |",
               "|---|---|---|---|---|---|"]
@@ -368,14 +469,20 @@ def report_md(path, score, hits, page_flags):
               "5. B7 逗号链 → 一句 ≥3 个逗号就拆成短句，句号果断；",
               "6. B8/B9 感叹号与设问 → 标题零感叹号，设问改直陈；",
               "7. B1/B2 数字框架、对仗骈偶、「不是A而是B」→ 拆，关联词全稿 ≤2 处；",
-              "8. A 类词面 → 英文标签留 1–2 个，空词连接词清零。", "",
-              "> 本报告为启发式扫描，结构模式需人工确认；另请过一遍 `references/ppt-ai-patterns.md` 的 D 类结构信号检查单。改写方法见 `references/syntax-five-rules.md` 与 `references/page-type-playbook.md`。"]
+              "8. A 类词面 → 英文标签留 1–2 个，空词连接词清零。"]
+    if strict:
+        lines += ["9. C 类实战配额（严格模式）→ 比喻/功能词/指示词/否定词清零，双行标题配平；B2/B3/B8/B9 配额同步收紧为 0 或 ≤1，规则见 `references/strict-mode-rules.md`。"]
+    footer = ("> 本报告为启发式扫描，结构模式需人工确认；另请过一遍 `references/ppt-ai-patterns.md` 的 D 类结构信号检查单。"
+              "改写方法见 `references/syntax-five-rules.md` 与 `references/page-type-playbook.md`")
+    footer += (" 与 `references/strict-mode-rules.md`（规则六至十一）。" if strict else "。")
+    lines += ["", footer]
     return "\n".join(lines)
 
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     as_json = "--json" in sys.argv
+    strict = "--strict" in sys.argv
     if not args:
         print(__doc__)
         sys.exit(1)
@@ -383,13 +490,17 @@ def main():
     with open(path, encoding="utf-8") as f:
         text = f.read()
     pages = parse_pages(text)
-    score, hits, page_flags = scan(pages)
+    score, hits, page_flags = scan(pages, strict=strict)
+    shi_count = sum(s.count("是") for _, segs in pages for s in segs) if strict else 0
     if as_json:
-        print(json.dumps({"file": path, "score": score, "grade": grade(score),
-                          "hits": hits, "page_flags": {str(k): v for k, v in page_flags.items()}},
-                         ensure_ascii=False, indent=2))
+        out = {"file": path, "score": score, "grade": grade(score),
+               "strict": strict, "hits": hits,
+               "page_flags": {str(k): v for k, v in page_flags.items()}}
+        if strict:
+            out["shi_count"] = shi_count
+        print(json.dumps(out, ensure_ascii=False, indent=2))
     else:
-        print(report_md(path, score, hits, page_flags))
+        print(report_md(path, score, hits, page_flags, strict=strict, shi_count=shi_count))
 
 
 if __name__ == "__main__":
